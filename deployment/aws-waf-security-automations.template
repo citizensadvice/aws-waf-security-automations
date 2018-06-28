@@ -129,6 +129,12 @@
       "Default": "240",
       "MinValue": "0",
       "Description": "If you chose yes for the Activate Scanners & Probes Protection parameters, enter the period (in minutes) to block applicable IP addresses. If you chose to deactivate this protection, ignore this parameter."
+    },
+    "LambdaBucket": {
+      "Type": "String",
+      "Default": "",
+      "AllowedPattern": "(^$|^([a-z]|(\\d(?!\\d{0,2}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})))([a-z\\d]|(\\.(?!(\\.|-)))|(-(?!\\.))){1,61}[a-z\\d]$)",
+      "Description": "Enter a name for the Amazon S3 bucket where the AWS Security Solutions WAF Lambdas are stored. More about bucket name restriction here: http://amzn.to/1p1YlU5"
     }
   },
 
@@ -543,7 +549,22 @@
         "DefaultAction": {
           "Type": "ALLOW"
         },
-        "MetricName": "SecurityAutomationsMaliciousRequesters",
+        "MetricName": {
+          "Fn::Join": ["",
+            [
+              {
+                "Fn::Join": ["",
+                  {
+                    "Fn::Split": ["-",
+                      {"Ref": "AWS::StackName"}
+                    ]
+                  }
+                ]
+              },
+              "WAFRequesters"
+            ]
+          ]
+        },
         "Rules": [{
           "Action": {
             "Type": "ALLOW"
@@ -691,12 +712,7 @@
           "Fn::GetAtt": ["LambdaRoleLogParser", "Arn"]
         },
         "Code": {
-          "S3Bucket": {
-            "Fn::Join": ["-", [
-              "%%BUCKET_NAME%%", {
-                "Ref": "AWS::Region"
-              }
-            ]]
+          "S3Bucket": { "Ref": "LambdaBucket"
           },
           "S3Key": "aws-waf-security-automations/v2/log-parser.zip"
         },
@@ -728,7 +744,23 @@
             "REGION": {
               "Ref": "AWS::Region"
             },
-            "LOG_TYPE": "cloudfront"
+            "LOG_TYPE": "cloudfront",
+            "ACL_METRIC_NAME": {
+              "Fn::Join": ["",
+                [
+                  {
+                    "Fn::Join": ["",
+                      {
+                        "Fn::Split": ["-",
+                          {"Ref": "AWS::StackName"}
+                        ]
+                      }
+                    ]
+                  },
+                  "WAFRequesters"
+                ]
+              ]
+            }
           }
         },
         "Runtime": "python2.7",
@@ -876,12 +908,7 @@
           ]
         },
         "Code": {
-          "S3Bucket": {
-            "Fn::Join": ["-", [
-              "%%BUCKET_NAME%%", {
-                "Ref": "AWS::Region"
-              }
-            ]]
+          "S3Bucket": { "Ref": "LambdaBucket"
           },
           "S3Key": "aws-waf-security-automations/v3/reputation-lists-parser.zip"
         },
@@ -895,8 +922,24 @@
             },
             "UUID": {
               "Fn::GetAtt": ["CreateUniqueID", "UUID"]
+            },
+            "ACL_METRIC_NAME": {
+              "Fn::Join": ["",
+                [
+                  {
+                    "Fn::Join": ["",
+                      {
+                        "Fn::Split": ["-",
+                          {"Ref": "AWS::StackName"}
+                        ]
+                      }
+                    ]
+                  },
+                  "WAFRequesters"
+                ]
+              ]
             }
-          }
+	  }
         }
       }
     },
@@ -1070,13 +1113,8 @@
           "Fn::GetAtt": ["LambdaRoleBadBot", "Arn"]
         },
         "Code": {
-          "S3Bucket": {
-            "Fn::Join": ["-", [
-              "%%BUCKET_NAME%%", {
-                "Ref": "AWS::Region"
-              }
-            ]]
-          },
+          "S3Bucket": { "Ref": "LambdaBucket"
+          } ,
           "S3Key": "aws-waf-security-automations/v2/access-handler.zip"
         },
         "Environment": {
@@ -1093,7 +1131,23 @@
             "REGION": {
               "Ref": "AWS::Region"
             },
-            "LOG_TYPE": "cloudfront"
+            "LOG_TYPE": "cloudfront",
+            "ACL_METRIC_NAME":{
+              "Fn::Join": ["",
+                [
+                  {
+                    "Fn::Join": ["",
+                      { 
+                        "Fn::Split": ["-",
+                          {"Ref": "AWS::StackName"}
+                        ]
+                      }
+                    ]
+                  },
+                  "WAFRequesters"
+                ]
+              ]
+            }
           }
         },
         "Runtime": "python2.7",
