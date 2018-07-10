@@ -37,7 +37,9 @@ LINE_FORMAT_CLOUD_FRONT = {
     'date': 0,
     'time' : 1,
     'source_ip' : 4,
-    'code' : 8
+    'code' : 8,
+    'method': 5,
+    'uri_stem': 7
 }
 # ALB Access Logs
 # http://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-access-logs.html
@@ -64,6 +66,14 @@ def get_outstanding_requesters(bucket_name, key_name):
     outstanding_requesters['block'] = {}
     result = {}
     num_requests = 0
+    #----------------------------------------------------------------------------
+    # for cab code - going to send all blocked requests from a single file as
+    # a single request to the blocked request logger
+    #----------------------------------------------------------------------------
+    blocked_requests = []
+    #----------------------------------------------------------------------------
+    # end of cab code
+    #----------------------------------------------------------------------------
     try:
         if int(environ['ERROR_PER_MINUTE_LIMIT']) < 0:
             return outstanding_requesters, num_requests
@@ -107,10 +117,48 @@ def get_outstanding_requesters(bucket_name, key_name):
                     if line_data[return_code_index] in BLOCK_ERROR_CODES:
                         result[request_key][ERROR_COUNTER_INDEX] += 1
 
+                        #----------------------------------------------------------------------------
+                        # cab code to add blocked request to array of blocked requests... need the
+                        # fields from cloudfront log that match fields in get-sampled-requests
+                        #----------------------------------------------------------------------------
+                        if environ['LOG_TYPE'] == 'cloudfront':
+                            #--------------------------------------------------------------------------------------------------------------
+                            print("[get_outstanding_requesters] \tCollating blocked requests from file")
+                            #--------------------------------------------------------------------------------------------------------------
+                            # get all the variables we need
+                            req_date = line_data[LINE_FORMAT_CLOUD_FRONT['date']]
+                            req_time = line_data[LINE_FORMAT_CLOUD_FRONT['time']]
+                            req_source_ip = line_data[LINE_FORMAT_CLOUD_FRONT['source_ip']]
+                            req_method = line_data[LINE_FORMAT_CLOUD_FRONT['method']]
+                            req_uri_stem = line_data[LINE_FORMAT_CLOUD_FRONT['uri_stem']]
+                            # add to list of blocked requests
+                            blocked_requests.append({'ReqDate': req_date, 'ReqTime': req_time, 'ReqIP': req_source_ip, 'ReqMethod': req_method, 'ReqUri': req_uri_stem})
+                        #----------------------------------------------------------------------------
+                        # end of cab code to collate blocked requests
+                        #----------------------------------------------------------------------------
+
                     num_requests += 1
 
                 except Exception, e:
                     print ("[get_outstanding_requesters] \t\tError to process line: %s"%line)
+
+        #-----------------------------------------------------------
+        # cab code to invoke blocked-request-logger
+        #-----------------------------------------------------------
+        if len(blocked_requests) > 0:
+            #--------------------------------------------------------------------------------------------------------------
+            print("[get_outstanding_requesters] \tCalling blocked-request-logger")
+            #--------------------------------------------------------------------------------------------------------------
+            blocked_request_lambda_function = environ['BLOCKED_REQUEST_LOGGER_LAMBDA_FUNCTION']
+            lambda_client = boto3.client('lambda')
+            lambda_client.invoke(
+                FunctionName=blocked_request_lambda_function,
+                InvocationType='Event', #call asynchronously
+                Payload=json.dumps({'CloudfrontLogFilename': key_name, 'BlockedRequests': blocked_requests})
+            )
+        #-----------------------------------------------------------
+        # end of cab code to invoke blocked-request-logger
+        #-----------------------------------------------------------
 
         #--------------------------------------------------------------------------------------------------------------
         print("[get_outstanding_requesters] \tKeep only outstanding requesters")
