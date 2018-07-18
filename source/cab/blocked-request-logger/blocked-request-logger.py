@@ -35,7 +35,6 @@ def lambda_handler(event, context):
     # prep
     #-----------------------------------------------
     blocked_requests = event['BlockedRequests']
-    cloudfront_log_filename = event['CloudfrontLogFilename']
     web_acl_name = get_web_acl_name(web_acl_id)
 
     #-----------------------------------------------
@@ -49,29 +48,45 @@ def lambda_handler(event, context):
     blocking_rule_ids = get_blocking_rule_ids(rules_info)
 
     #-----------------------------------------------
-    # start constructing error logs
+    # common info needed for error logging
     #-----------------------------------------------
-    num_blocked_requests = len(blocked_requests)
-    times_of_blocked_requests = get_request_ips_and_times(blocked_requests)
+    cloudfront_log_filename = event['CloudfrontLogFilename']
     search_interval_string = get_time_interval_string(search_interval_dt)
-    error_dict = {
-        'CloudfrontLogFilename': cloudfront_log_filename,
-        'NumOfBlockedRequests': num_blocked_requests,
-        'BlockedRequests': times_of_blocked_requests,
-        'SearchInterval': search_interval_string,
-        'NumOfMatchedSampledRequests': 0,
-        'MatchedSampledRequests': {}
-    }
+
+    #-----------------------------------------------
+    # ip specific info needed for error logging
+    #-----------------------------------------------
+    error_dict = {}
+    blocked_request_ips = []
+    for blocked_request in blocked_requests:
+        blocked_request_ip = blocked_request['ReqIP']
+        if blocked_request_ip not in blocked_request_ips:
+            blocked_request_ips.append(blocked_request_ip)
+            # create new entry in error_dict
+            error_dict[blocked_request_ip] = {
+                'BlockedRequestIP': blocked_request_ip,
+                'CloudfrontLogFilename': cloudfront_log_filename,
+                'NumOfBlockedRequests': 0,
+                'BlockedRequests': [],
+                'SearchInterval': search_interval_string,
+                'NumOfMatchedSampledRequests': 0,
+                'NumOf404Requests': 0,
+                'MatchedSampledRequests': []
+            }
+        # update the entry in the error dictionary for this ip address
+        error_dict[blocked_request_ip]['NumOfBlockedRequests'] += 1
+        if blocked_request['ReqStatus'] == '404':
+            error_dict[blocked_request_ip]['NumOf404Requests'] += 1
+        error_dict[blocked_request_ip]['BlockedRequests'].append({
+            'Time': blocked_request['ReqDate'] + ' ' + blocked_request['ReqTime'],
+            'Status': blocked_request['ReqStatus']
+        })
 
     #-----------------------------------------------
     # get-sampled-requests and process results
     #-----------------------------------------------
     for blocking_rule_id in blocking_rule_ids:
         rule_metric_name = rules_info[blocking_rule_id]['MetricName']
-        error_dict['MatchedSampledRequests'][rule_metric_name] = {
-            'NumOfMatchedRequests': 0,
-            'MatchedRequests': []
-        }
         results = get_sampled_requests(web_acl_id, blocking_rule_id,
                                        search_interval_dt, MAX_SAMPLED_ITEMS)
         sampled_requests = results['SampledRequests']
@@ -81,29 +96,34 @@ def lambda_handler(event, context):
             sampled_interval_string = get_time_interval_string(
                 sampled_interval_dt)
             # work through blocked requests, looking for matching sampled requests
+            # grouping by ip address
             for blocked_request in blocked_requests:
+                # keep track of requests we've matched
                 matched_requests = []
+                # is this the first time we've seen this rule with this ip address?
+                if not any(msr['RuleName'] == rule_metric_name for msr \
+                        in error_dict[blocked_request_ip]['MatchedSampledRequests']):
+                    rule_dict = {
+                        'RuleName': rule_metric_name,
+                        'SampledInterval': sampled_interval_string,
+                        'NumOfMatchedRequests': 0,
+                        'MatchedRequests': []
+                    }
+                    error_dict[blocked_request_ip]['MatchedSampledRequests'].append(rule_dict)
+                # work through sampled requests
                 for sampled_request in sampled_requests or []:
                     if sampled_request_matches_blocked_request(
                             sampled_request, blocked_request):
-                        # create a log entry for the blocked request and
-                        # matching sampled request
+                        # create a log entry for the sampled request
                         create_log_entry(sampled_request, web_acl_name,
-                                         rule_metric_name)
-                        # add info to error_dict
-                        request_ip = sampled_request['Request']['ClientIP']
+                                rule_metric_name)
+                        error_dict[blocked_request_ip]['NumOfMatchedSampledRequests'] += 1
+                        # and update rule_dict for this ip address and rule
                         request_time = get_request_time_string(sampled_request)
-                        error_dict['MatchedSampledRequests'][rule_metric_name][
-                            'MatchedRequests'].append({
-                                'MatchedRequest': {
-                                    'MatchedRequestIP': request_ip,
-                                    'MatchedRequestTime': request_time
-                                }
-                            })
-                        error_dict['MatchedSampledRequests'][rule_metric_name][
-                            'NumOfMatchedRequests'] += 1
-                        error_dict['NumOfMatchedSampledRequests'] += 1
-                        error_dict['SampledInterval'] = sampled_interval_string
+                        rule_dict['MatchedRequests'].append({
+                            'MatchedRequestTime': request_time
+                        })
+                        rule_dict['NumOfMatchedRequests'] += 1
                         # once sampled request logged, no need to look at again
                         matched_requests.append(sampled_request)
                 # slice sampled_requests to remove matched_requests before
@@ -111,11 +131,15 @@ def lambda_handler(event, context):
                 sampled_requests[:] = [
                     x for x in sampled_requests if x not in matched_requests
                 ]
-    # check if insufficient sampled requests (NB. can only say if there are definitely
-    # insufficient - can't guarantee there are definitely sufficient because of rounding times!)
-    if error_dict['NumOfBlockedRequests'] > error_dict['NumOfMatchedSampledRequests']:
-        create_error_log(error_dict, web_acl_name, cloudfront_log_filename)
-
+    # check if insufficient sampled requests for each ip address with blocked
+    # requests (NB. can only say if there are definitely insufficient - can't
+    # guarantee there are definitely sufficient because of rounding times!)
+    for blocked_request_ip in blocked_request_ips:
+        if error_dict[blocked_request_ip]['NumOfBlockedRequests'] \
+                > error_dict[blocked_request_ip]['NumOfMatchedSampledRequests']:
+            create_error_log(
+                error_dict[blocked_request_ip],
+                web_acl_name, cloudfront_log_filename)
 
 #==========================
 # Helper functions
@@ -137,7 +161,8 @@ def create_log_entry(sampled_request, web_acl_name, rule_metric_name):
             + '/rule=' + rule_metric_name + '/'
     # filename info:
     dt = sampled_request['Timestamp']
-    # want utc i.e. remove any local timezone stuff by making naive, but no need to truncate
+    # want utc i.e. remove any local timezone stuff by making naive, but no
+    # need to truncate
     naive_time = aware_to_naive_datetime(dt, truncated=False)
     # replace with string
     unixtime = str(
@@ -145,23 +170,13 @@ def create_log_entry(sampled_request, web_acl_name, rule_metric_name):
             time.mktime(naive_time.timetuple()) * 1000 +
             naive_time.microsecond / 1000))
     filename = 'request_blocked_at_' + unixtime
-    # replace sampled_request['Timestamp'] with unixtime so json serializable
-    sampled_request['Timestamp'] = unixtime
-    # file contents = dictionary
-    dict = {
-        'WebACLName': web_acl_name,
-        'BlockingRule': rule_metric_name,
-        'SampledRequestInfo': sampled_request,
-    }
+    # Add json serializable timestamp into the request we're logging
+    sampled_request['Request']['Timestamp'] = unixtime
     # create file to upload
-    file_to_upload = create_gz_from_json(dict, filename)
+    file_to_upload = create_gz_from_json(sampled_request['Request'], filename)
     # and publish to s3
     upload_file_to_s3(file_to_upload, waf_log_bucket_name,
                       foldername + filename + '.json.gz')
-    # change sampled_request['Timestamp'] back to its original value for future
-    # comparisons (now that we are processing requests in groups, a sampled request
-    # might get looked at multiple times)
-    sampled_request['Timestamp'] = dt
 
 
 #----------------------------------------------
@@ -172,15 +187,15 @@ def create_error_log(error_dict, web_acl_name, cloudfront_log_filename):
     naive_time = datetime.datetime.now(
     )  # already naive and no need to truncate
     datestamp = naive_time.strftime('%Y%m%d')
-    foldername = 'waf_logs/stack=' + stack_name + '/datestamp=' + datestamp \
-            + '/error_logs/'
+    foldername = 'error_logs/stack=' + stack_name + '/datestamp=' + datestamp \
+            + '/'
     # filename info - need timestamp
     unixtime = str(
         int(
             time.mktime(naive_time.timetuple()) * 1000 +
             naive_time.microsecond / 1000))
     filename = 'error_log_created_at_' + unixtime
-    print(filename)
+    print('[create_error_log] \t' + filename)
     # create file to upload
     file_to_upload = create_gz_from_json(error_dict, filename)
     # and publish to s3
@@ -320,10 +335,10 @@ def get_rules_info(web_acl_id):
                     rule_name = rule['Name']
                     rule_metric_name = rule['MetricName']
                 elif rule_type == 'RATE_BASED':
-                    # flood protection not used as of July 2018, since usually failed
-                    # to create rule, so if there's a run-time error with this method,
-                    # check if it's looking for a rule that, although listed under
-                    # the web acl, doesn't actually exist!!
+                    # flood protection not used as of July 2018, since usually
+                    # failed to create rule, so if there's a run-time error with
+                    # this method, check if it's looking for a rule that,
+                    # although listed under the web acl, doesn't actually exist!!
                     rule = waf.get_rate_based_rule(RuleId=rule_id)['Rule']
                     rule_name = rule['Name']
                     rule_metric_name = rule['MetricName']
@@ -377,8 +392,7 @@ def get_web_acl_name(web_acl_id):
 #------------------------------------------------------------------------
 def get_blocking_rule_ids(rules_info):
     response = []
-    rule_ids = rules_info.keys()
-    for rule_id in rule_ids:
+    for rule_id in rules_info:
         rule_name = rules_info[rule_id]['Name']
         if rule_name.upper().find('WHITELIST') < 0:
             response.append(rule_id)
@@ -446,20 +460,3 @@ def sampled_request_matches_blocked_request(sampled_request, blocked_request):
             blocked_dt + seconds_delta == naive_trunc_sample_dt or \
             blocked_dt - seconds_delta == naive_trunc_sample_dt) and \
             blocked_ip == sample_ip and blocked_method == sample_method
-
-
-#------------------------------------------------------------------------
-# construct list of times and ips from list of blocked requests
-#------------------------------------------------------------------------
-def get_request_ips_and_times(blocked_requests):
-    response = []
-    for blocked_request in blocked_requests:
-        response.append({
-            'BlockedRequest': {
-                'BlockedRequestTime':
-                blocked_request['ReqDate'] + ' ' + blocked_request['ReqTime'],
-                'BlockedRequestIP':
-                blocked_request['ReqIP']
-            }
-        })
-        return response
