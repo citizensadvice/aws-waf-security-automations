@@ -12,7 +12,7 @@
         "Label": {
           "default": "Settings"
         },
-        "Parameters": ["AccessLogBucket", "LambdaBucket", "WAFBlockedRequestLogBucket"]
+        "Parameters": ["AccessLogBucket", "LambdaBucket", "WAFBlockedRequestLogBucket", "CreateBlockedIpSNSTopic"]
       }, {
         "Label": {
           "default": "Advanced Settings"
@@ -63,6 +63,9 @@
         },
         "WAFBlockedRequestLogBucket": {
           "default": "WAF Blocked Requests Log Bucket"
+        },
+        "CreateBlockedIpSNSTopic": {
+          "default": "CreateBlockedIpSNSTopic"
         }
       }
     }
@@ -147,6 +150,12 @@
       "Default": "",
       "AllowedPattern": "(^$|^([a-z]|(\\d(?!\\d{0,2}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})))([a-z\\d]|(\\.(?!(\\.|-)))|(-(?!\\.))){1,61}[a-z\\d]$)",
       "Description": "Enter a name for the Amazon S3 bucket where the WAF logs (for blocked requests) are stored. More about bucket name restriction here: http://amzn.to/1p1YlU5"
+    },
+    "CreateBlockedIpSNSTopic": {
+      "Type": "String",
+      "Default": "no",
+      "AllowedValues": ["yes", "no"],
+      "Description": "To create an SNS topic for alarms when an IP address is blocked by the log-parser, select yes."
     }
   },
 
@@ -205,6 +214,11 @@
     "BlockedRequestLoggerActivated": {
       "Fn::Equals": [{
         "Ref": "ActivateScansProbesProtectionParam"
+      }, "yes"]
+    },
+    "BlockedIpSNSTopicCreated": {
+      "Fn::Equals": [{
+        "Ref": "CreateBlockedIpSNSTopic"
       }, "yes"]
     }
   },
@@ -717,6 +731,38 @@
               }
             }]
           }
+        }, {
+          "PolicyName": "BlockedIPSNSAlerts",
+          "PolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [{
+              "Effect": "Allow",
+              "Action":"sns:Publish",
+              "Resource": {
+                "Ref": "BlockedIpSNSTopic"
+              }
+            }]
+          }
+        }, {
+          "PolicyName": "WebACLAccessForAlerts",
+          "PolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [{
+              "Effect": "Allow",
+              "Action": [
+                "waf:GetWebACL"
+              ],
+              "Resource": {
+                "Fn::Join": ["", ["arn:aws:waf::", {
+                    "Ref": "AWS::AccountId"
+                  },
+                  ":webacl/", {
+                    "Ref": "WAFWebACL"
+                  }
+                ]]
+              }
+            }]
+          }
         }]
       }
     },
@@ -792,6 +838,12 @@
             },
             "BLOCKED_REQUEST_LOGGER_LAMBDA_FUNCTION": {
               "Ref": "LambdaWAFBlockedRequestLoggerFunction"
+            },
+            "SNS_TOPIC_ARN": { 
+              "Ref": "BlockedIpSNSTopic"
+            },
+            "WEB_ACL_ID": {
+              "Ref": "WAFWebACL"
             }
           }
         },
@@ -1967,6 +2019,17 @@
         },
         "CreateUniqueID": "true"
       }
+    },
+    "BlockedIpSNSTopic": {
+      "Type" : "AWS::SNS::Topic",
+      "Condition": "BlockedIpSNSTopicCreated",
+      "Properties" : {
+        "DisplayName": {
+          "Fn::Join": [" - ", [{
+            "Ref": "AWS::StackName"
+          }, "BlockedIpSNSTopic"]]
+        }
+      }
     }
   },
   "Outputs": {
@@ -1993,6 +2056,12 @@
         "Ref": "WAFWebACL"
       },
       "Condition": "CreateWebACL"
+    },
+    "BlockedIpSNSTopic": {
+      "Description": "Blocked IP SNS Topic Arn",
+      "Value": {
+        "Ref": "BlockedIpSNSTopic"
+      }
     }
   }
 }

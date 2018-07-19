@@ -39,7 +39,8 @@ LINE_FORMAT_CLOUD_FRONT = {
     'source_ip' : 4,
     'code' : 8,
     'method': 5,
-    'uri_stem': 7
+    'uri_stem': 7,
+    'status': 8
 }
 # ALB Access Logs
 # http://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-access-logs.html
@@ -118,21 +119,26 @@ def get_outstanding_requesters(bucket_name, key_name):
                         result[request_key][ERROR_COUNTER_INDEX] += 1
 
                         #----------------------------------------------------------------------------
-                        # cab code to add blocked request to array of blocked requests... need the
-                        # fields from cloudfront log that match fields in get-sampled-requests
+                        # cab code to add blocked request to array of blocked
+                        # requests... need the fields from cloudfront log that
+                        # match fields in get-sampled-requests
                         #----------------------------------------------------------------------------
                         if environ['LOG_TYPE'] == 'cloudfront':
-                            #--------------------------------------------------------------------------------------------------------------
-                            print("[get_outstanding_requesters] \tCollating blocked requests from file")
-                            #--------------------------------------------------------------------------------------------------------------
                             # get all the variables we need
                             req_date = line_data[LINE_FORMAT_CLOUD_FRONT['date']]
                             req_time = line_data[LINE_FORMAT_CLOUD_FRONT['time']]
                             req_source_ip = line_data[LINE_FORMAT_CLOUD_FRONT['source_ip']]
                             req_method = line_data[LINE_FORMAT_CLOUD_FRONT['method']]
                             req_uri_stem = line_data[LINE_FORMAT_CLOUD_FRONT['uri_stem']]
+                            req_status = line_data[LINE_FORMAT_CLOUD_FRONT['status']]
                             # add to list of blocked requests
-                            blocked_requests.append({'ReqDate': req_date, 'ReqTime': req_time, 'ReqIP': req_source_ip, 'ReqMethod': req_method, 'ReqUri': req_uri_stem})
+                            blocked_requests.append({
+                                'ReqDate': req_date,
+                                'ReqTime': req_time,
+                                'ReqIP': req_source_ip,
+                                'ReqMethod': req_method,
+                                'ReqUri': req_uri_stem,
+                                'ReqStatus': req_status})
                         #----------------------------------------------------------------------------
                         # end of cab code to collate blocked requests
                         #----------------------------------------------------------------------------
@@ -146,15 +152,19 @@ def get_outstanding_requesters(bucket_name, key_name):
         # cab code to invoke blocked-request-logger
         #-----------------------------------------------------------
         if len(blocked_requests) > 0:
-            #--------------------------------------------------------------------------------------------------------------
+            #---------------------------------------------------------------------
             print("[get_outstanding_requesters] \tCalling blocked-request-logger")
-            #--------------------------------------------------------------------------------------------------------------
-            blocked_request_lambda_function = environ['BLOCKED_REQUEST_LOGGER_LAMBDA_FUNCTION']
+            #---------------------------------------------------------------------
+            blocked_request_lambda_function \
+                    = environ['BLOCKED_REQUEST_LOGGER_LAMBDA_FUNCTION']
             lambda_client = boto3.client('lambda')
             lambda_client.invoke(
                 FunctionName=blocked_request_lambda_function,
                 InvocationType='Event', #call asynchronously
-                Payload=json.dumps({'CloudfrontLogFilename': key_name, 'BlockedRequests': blocked_requests})
+                Payload=json.dumps({
+                    'CloudfrontLogFilename': key_name,
+                    'BlockedRequests': blocked_requests
+                })
             )
         #-----------------------------------------------------------
         # end of cab code to invoke blocked-request-logger
@@ -209,6 +219,22 @@ def merge_current_blocked_requesters(key_name, outstanding_requesters):
         with open(local_file_path, 'r') as file_content:
             remote_outstanding_requesters = json.loads(file_content.read())
 
+        #----------------------------------------------------------------------------
+        # cab code: what the aws code does is go through the remote outstanding
+        # requesters ips and work out which ones need to stay by being added to
+        # the local outstanding requesters to be sent to the s3 bucket. What we
+        # need to do instead is work out which of the local oustanding requesters
+        # are 'new', ie not in the remote outstanding requesters
+        #----------------------------------------------------------------------------
+        new_outstanding_requesters = {'block': {}}
+        for k in outstanding_requesters['block'].keys():
+            if k not in remote_outstanding_requesters.keys():
+                new_outstanding_requesters['block'][k] \
+                        = outstanding_requesters['block'][k]
+        #----------------------------------------------------------------------------
+        # end of cab added code
+        #----------------------------------------------------------------------------
+
         #----------------------------------------------------------------------------------------------------------
         print("[merge_current_blocked_requesters] \tExpire Block IP rules")
         #----------------------------------------------------------------------------------------------------------
@@ -243,9 +269,11 @@ def merge_current_blocked_requesters(key_name, outstanding_requesters):
         print(e)
 
     need_update = (expired or last_update_age > int(environ['MAX_AGE_TO_UPDATE']) or len(outstanding_requesters['block']) > 0)
-
     print("[merge_current_blocked_requesters] End")
-    return outstanding_requesters, need_update
+    #----------------------------------------------------------------------------
+    # cab amendment to return new_outstanding_requesters too
+    #----------------------------------------------------------------------------
+    return outstanding_requesters, need_update, new_outstanding_requesters
 
 def write_output(key_name, outstanding_requesters):
     print("[write_output] Start")
@@ -604,13 +632,23 @@ def lambda_handler(event, context):
         #--------------------------------------------------------------------------------------------------------------
         print("[lambda_handler] \tMerge with current blocked requesters")
         #--------------------------------------------------------------------------------------------------------------
-        outstanding_requesters, need_update = merge_current_blocked_requesters(key_name, outstanding_requesters)
+        outstanding_requesters, need_update, new_outstanding_requesters \
+                = merge_current_blocked_requesters(key_name, outstanding_requesters)
+
+        #----------------------------------------------------------------------------
+        # cab code to trigger alarm if new_outstanding_requesters is non-empty
+        #----------------------------------------------------------------------------
+        if len(new_outstanding_requesters['block']) > 0:
+            print("[lambda_handler] \tPublish alert for new outstanding requesters")
+            notification.publish(new_outstanding_requesters)
+        #----------------------------------------------------------------------------
+        # end of cab code
+        #----------------------------------------------------------------------------
 
         if need_update:
             #----------------------------------------------------------------------------------------------------------
             print("[lambda_handler] \tUpdate new blocked requesters list to S3")
             #----------------------------------------------------------------------------------------------------------
-            notification.publish(outstanding_requesters)
             write_output(key_name, outstanding_requesters)
 
             #----------------------------------------------------------------------------------------------------------
