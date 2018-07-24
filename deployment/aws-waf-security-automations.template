@@ -220,6 +220,13 @@
       "Fn::Equals": [{
         "Ref": "CreateBlockedIpSNSTopic"
       }, "yes"]
+    },
+    "LogParserActivatedWithSNS": {
+      "Fn::And": [{
+        "Condition": "LogParserActivated"
+      }, {
+        "Condition": "BlockedIpSNSTopicCreated"
+      }]
     }
   },
   "Resources": {
@@ -732,18 +739,6 @@
             }]
           }
         }, {
-          "PolicyName": "BlockedIPSNSAlerts",
-          "PolicyDocument": {
-            "Version": "2012-10-17",
-            "Statement": [{
-              "Effect": "Allow",
-              "Action":"sns:Publish",
-              "Resource": {
-                "Ref": "BlockedIpSNSTopic"
-              }
-            }]
-          }
-        }, {
           "PolicyName": "WebACLAccessForAlerts",
           "PolicyDocument": {
             "Version": "2012-10-17",
@@ -766,6 +761,28 @@
         }]
       }
     },
+    "BlockedIPSNSAlertsPolicy": {
+      "Type": "AWS::IAM::Policy",
+      "Condition": "LogParserActivatedWithSNS",
+      "Properties": {
+        "PolicyName": "BlockedIPSNSAlerts",
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Effect": "Allow",
+            "Action":"sns:Publish",
+            "Resource": {
+              "Ref": "BlockedIpSNSTopic"
+            }
+          }]
+        },
+        "Roles": [
+          {
+            "Ref": "LambdaRoleLogParser"
+          }
+        ]
+      }
+    }, 
     "LambdaWAFLogParserFunction": {
       "Type": "AWS::Lambda::Function",
       "Condition": "LogParserActivated",
@@ -839,8 +856,12 @@
             "BLOCKED_REQUEST_LOGGER_LAMBDA_FUNCTION": {
               "Ref": "LambdaWAFBlockedRequestLoggerFunction"
             },
-            "SNS_TOPIC_ARN": { 
-              "Ref": "BlockedIpSNSTopic"
+            "SNS_TOPIC_ARN": {
+              "Fn::If": ["BlockedIpSNSTopicCreated", {
+                "Ref": "BlockedIpSNSTopic"
+              }, {
+                "Ref": "AWS::NoValue"
+              }]
             },
             "WEB_ACL_ID": {
               "Ref": "WAFWebACL"
@@ -1219,7 +1240,7 @@
                 ]
               ]
             }
-	  }
+          }
         }
       }
     },
@@ -2061,7 +2082,8 @@
       "Description": "Blocked IP SNS Topic Arn",
       "Value": {
         "Ref": "BlockedIpSNSTopic"
-      }
+      },
+      "Condition": "BlockedIpSNSTopicCreated"
     }
   }
 }
